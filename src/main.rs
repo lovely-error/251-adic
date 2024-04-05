@@ -225,50 +225,6 @@ impl Zmod251 {
 
         return transmute(out);
     } }
-    fn mul(&self, another: Self) -> Self {
-        let powers = Simd::from_array([
-            1,
-            251,
-            251u64.pow(2),
-            251u64.pow(3),
-            251u64.pow(4),
-            251u64.pow(5),
-            251u64.pow(6),
-            251u64.pow(7)
-        ]);
-        let another_ = another.as_terms();
-        let terms1 = Simd::from_array(another_).cast::<u64>();
-        let this = self.as_complement_faster();
-        let number = Simd::splat(this);
-        let muled = terms1.mul(powers).mul(number);
-        let muled = muled.to_array();
-        let mut lim = 0;
-        for ix in 0 .. 8 {
-            if terms1[7 - ix] != 0 { break }
-            lim = ix
-        }
-        lim = 7 - lim;
-
-        let mut terms = [0u8;8];
-        for ix in 0 .. lim {
-            let mut mul = muled[ix];
-            let mut ix_ = 0;
-            loop {
-                if ix_ == 8 || ix_ >= lim && mul == 0 { break }
-                let d = fdiv251_u64(mul);
-                let rem = mul - 251 * d;
-                let n = terms[ix_] as u16;
-                let n = n + rem as u16;
-                let n_ = n % 251;
-                terms[ix_] = n_ as u8;
-                mul = d + (n > n_) as u64;
-                ix_ += 1;
-            }
-        }
-
-        let ret = unsafe { transmute(terms) };
-        return Self(ret);
-    }
     fn abs(&self) -> Self {
         let this = *self;
         if self.0 & ((1 << 8) - 1) << 56 != 0 {
@@ -278,66 +234,7 @@ impl Zmod251 {
             this
         }
     }
-    fn mul_signed(&self, another: Self) -> Self {
-        let mut bc = 0;
-        let mut this = *self;
-        if self.0 & ((1 << 8) - 1) << 56 != 0 {
-            bc += 1;
-            this = self.abs();
-        };
-        let mut another = another;
-        if another.0 & ((1 << 8) - 1) << 56 != 0 {
-            bc += 1;
-            another = another.abs();
-        };
-        let neg = bc & 1 == 1;
-        let powers = Simd::from_array([
-            1,
-            251,
-            251u64.pow(2),
-            251u64.pow(3),
-            251u64.pow(4),
-            251u64.pow(5),
-            251u64.pow(6),
-            251u64.pow(7)
-        ]);
-        let another_ = another.as_terms();
-        let terms1 = Simd::from_array(another_).cast::<u64>();
-        let number = this.as_complement_faster();
-        let muled = terms1.mul(powers).mul(Simd::splat(number));
-        let muled = muled.to_array();
-        let mut lim = 0;
-        for ix in 0 .. 8 {
-            if terms1[7 - ix] != 0 { break }
-            lim = ix
-        }
-        lim = 7 - lim;
 
-        let mut terms = [0u8;8];
-        for ix in 0 .. lim {
-            let mut mul = muled[ix];
-            let mut ix_ = 0;
-            loop {
-                if ix_ == 8 || ix_ >= lim && mul == 0 { break }
-                let d = fdiv251_u64(mul);
-                let rem = mul - 251 * d;
-                let n = terms[ix_] as u16;
-                let n = n + rem as u16;
-                let n_ = n % 251;
-                terms[ix_] = n_ as u8;
-                mul = d + (n > n_) as u64;
-                ix_ += 1;
-            }
-        }
-
-        let ret = unsafe { transmute(terms) };
-        let mut ret = Self(ret);
-        if neg {
-            ret = Self::zero().sub(ret);
-        }
-
-        return ret;
-    }
     fn sub(&self, another: Self) -> Self {
         let this = self.as_terms();
         let another = another.as_terms();
@@ -355,8 +252,69 @@ impl Zmod251 {
         let result = unsafe { transmute(result) };
         return Self(result);
     }
-    fn reciprocal(&self) -> Self {
-        todo!()
+    fn reciprocal(&self) -> Option<Self> {
+        // https://ru.wikipedia.org/wiki/%D0%A0%D0%B0%D1%81%D1%88%D0%B8%D1%80%D0%B5%D0%BD%D0%BD%D1%8B%D0%B9_%D0%B0%D0%BB%D0%B3%D0%BE%D1%80%D0%B8%D1%82%D0%BC_%D0%95%D0%B2%D0%BA%D0%BB%D0%B8%D0%B4%D0%B0
+        // 15753961211814251999
+        let n = Self::MAX as i128;
+        let mut t = 0;
+        let mut r = n;
+        let mut new_t = 1;
+        let mut new_r = self.as_complement_faster() as i128;
+        while new_r != 0 {
+            let q = r / new_r;
+            t = new_t;
+            new_t = t - q * new_t;
+            r = new_r;
+            new_r = r - q * new_r;
+        }
+        if r > 1 { return None; }
+        if t < 0  { t = t + n; }
+
+        let n = Self::from_positive(t as _);
+        return Some(n);
+    }
+    fn mul(&self, another: Self) -> Self {
+        fn compute_row(
+            row: [u8;8],
+            number: u8
+        ) -> [u8;8] {
+            let number = number as u16;
+            let mut ords = [0u8;8];
+            let mut extent = 0;
+            for i in 0 .. 8 {
+                let ord = row[i] as u16;
+                let mult = ord * number + extent;
+                let rem = mult % 251;
+                ords[i] = rem as u8;
+                extent = (mult - rem) / 251;
+            }
+            return ords;
+        }
+        fn implace(
+            pivot: usize,
+            acc: [u8;8],
+            row: [u8;8]
+        ) -> [u8;8] {
+            let mut acc = acc;
+            let mut extent = 0;
+            for i in pivot .. 8 {
+                let v = acc[i] as u16 + row[i - pivot] as u16 + extent;
+                let ord = v % 251;
+                acc[i] = ord as u8;
+                extent = (v >= 251) as _;
+            }
+            return acc;
+        }
+
+        let a = self.as_terms();
+        let b = another.as_terms();
+        let mut dig_ords = [0u8;8];
+        for i in 0 .. 8 {
+            let row = compute_row(a, b[i]);
+            dig_ords = implace(i, dig_ords, row);
+        }
+        let res = unsafe { transmute::<_, u64>(dig_ords) };
+        return Self(res);
     }
 }
 
@@ -370,11 +328,8 @@ fn props_tests() {
     assert!(c.as_signed() == (0, true));
 
     // a * 2 = 1
-    let mut a = Zmod251::from_positive(0);
-    a.0 = unsafe {
-        transmute([126u8, 125, 125, 125, 125, 125, 125, 125])
-    };
-    let b = Zmod251::from_positive(2);
+    let a = Zmod251::from_positive(2);
+    let b = a.reciprocal().unwrap();
     let c = a.mul(b);
     assert!(c.as_positive() == 1);
 
@@ -390,6 +345,10 @@ fn props_tests() {
     let c = a.add_faster(b);
     assert!(c.as_signed() == (2, false));
 
+    // a * a = 2
+
+    // a * a = -1
+
 }
 
 #[test]
@@ -402,10 +361,17 @@ fn t1() {
     let b = Zmod251::from_positive(b_);
     // println!("{:?} {:?}", b.as_signed(), b.as_terms());
     let c = a.mul(b);
-    // println!("{} {:?} mul2", c.as_positive(), c.as_terms());
-    // println!("{}", a_ * b_);
+    println!("{} {:?} __mul2", c.as_positive(), c.as_terms());
+
     let correct = a_ * b_;
-    assert!(c.as_positive() == correct);
+    println!("{} correct", correct);
+
+    let correct_computed = Zmod251::from_two_complement(correct);
+    println!("{} {:?}", correct_computed.as_positive(), correct_computed.as_terms());
+
+    let computed = c.as_complement_number();
+    assert!(computed == correct);
+
 
     let mut a = Zmod251::from_positive(0);
     a.0 = unsafe {
@@ -427,27 +393,34 @@ fn t2() {
     // println!("{:?} {:?}", a.as_signed(), a.as_terms());
     let b = Zmod251::from_signed(b_);
     // println!("{:?} {:?}", b.as_signed(), b.as_terms());
-    let c = a.mul_signed(b);
+    let c = a.mul(b);
+    println!("{:?} {:?} mul", c.as_signed(), c.as_terms());
     assert!(c.as_signed() == (n, false));
-    // println!("{:?} {:?} mul", c.as_signed(), c.as_terms());
 
     let a = Zmod251::from_signed(a_);
     // println!("{:?} {:?}", a.as_signed(), a.as_terms());
     let b = Zmod251::from_signed(-b_);
     // println!("{:?} {:?}", b.as_signed(), b.as_terms());
-    let c = a.mul_signed(b);
+    let c = a.mul(b);
     assert!(c.as_signed() == (n, false));
 
     let a = Zmod251::from_signed(-a_);
     // println!("{:?} {:?}", a.as_signed(), a.as_terms());
     let b = Zmod251::from_signed(-b_);
     // println!("{:?} {:?}", b.as_signed(), b.as_terms());
-    let c = a.mul_signed(b);
+    let c = a.mul(b);
     assert!(c.as_signed() == (n, true));
 }
 
 fn main() {
-
+    // a * 2 = 1
+    // [126u8, 125, 125, 125, 125, 125, 125, 125]
+    let a = Zmod251::from_positive(7);
+    println!("{:?}", a.as_terms());
+    let b = a.reciprocal().unwrap();
+    println!("{:?}", b.as_terms());
+    let c = a.mul(b);
+    println!("{:?} {:?} mul2", c.as_complement_faster(), c.as_terms(),);
 }
 
 // let primes = [2u64, 3, 5, 7, 11, 13, 17, 19, 23, 29, 31, 37, 41, 43, 47, 53, 59, 61, 67, 71, 73, 79, 83, 89, 97, 101, 103, 107, 109, 113, 127, 131, 137, 139, 149, 151, 157, 163, 167, 173, 179, 181, 191, 193, 197, 199, 211, 223, 227, 229, 233, 239, 241, 251];
