@@ -1,6 +1,6 @@
 #![feature(inline_const)]
 #![feature(portable_simd)]
-use core::{mem::transmute, ops::{Add, Mul, Not, Sub}, simd::{Mask, Simd, SimdInt, SimdPartialOrd, SimdUint }};
+use core::{mem::transmute, ops::{Add, Mul, Not, Sub}, simd::{prelude::{SimdInt, SimdPartialOrd, SimdUint}, Mask, Simd }};
 
 
 
@@ -197,7 +197,7 @@ impl Zmod251 {
                 .cast::<u16>();
             let overflow_bits1_shifted = rot_mask
                 .select(overflow_bits1, Simd::splat(0))
-                .rotate_lanes_right::<1>();
+                .rotate_elements_right::<1>();
             comb = comb.add(overflow_bits1_shifted);
         }
 
@@ -255,7 +255,7 @@ impl Zmod251 {
     pub fn reciprocal(&self) -> Option<Self> {
         // https://ru.wikipedia.org/wiki/%D0%A0%D0%B0%D1%81%D1%88%D0%B8%D1%80%D0%B5%D0%BD%D0%BD%D1%8B%D0%B9_%D0%B0%D0%BB%D0%B3%D0%BE%D1%80%D0%B8%D1%82%D0%BC_%D0%95%D0%B2%D0%BA%D0%BB%D0%B8%D0%B4%D0%B0
         // 15753961211814251999
-        let n = (Self::MAX) as i128;
+        let n = (15753961211814251999) as i128;
         let mut t = 0;
         let mut r = n;
         let mut new_t = 1;
@@ -270,7 +270,7 @@ impl Zmod251 {
         if r > 1 { return None; }
         if t < 0  { t = t + n; }
 
-        let n = Self::from_positive(t as _);
+        let n = Self::from_two_complement(t as _);
         return Some(n);
     }
     pub fn mul(&self, another: Self) -> Self {
@@ -489,26 +489,6 @@ fn t3() {
     assert!(d.as_positive() == 2);
 }
 
-#[test] #[ignore]
-fn t4() {
-    let mut str = String::new();
-    use core::fmt::Write;
-    for p in 1 .. 10 {
-        let lim = 2u64.pow(p);
-        for k in 1 .. lim {
-            let a = Zmod251::from_positive(k);
-            let a = a.reciprocal().unwrap();
-            // println!("{:?} recip", a.as_terms());
-            let b = Zmod251::from_positive(lim*k);
-            let c = a.mul(b);
-            let n = c.as_positive();
-            // println!("{:?} {:?} res", c.as_signed(), c.as_terms());
-            let ok = if n == lim { "✔️" } else { "❌" };
-            writeln!(&mut str, "({} * {}) * 1/{} = {} {}", lim, k, k, n, ok).unwrap();
-        }
-    }
-    println!("{}", str)
-}
 #[test]
 fn t5() {
     let mut str = String::new();
@@ -521,11 +501,12 @@ fn t5() {
             // println!("{:?} recip", a.as_terms());
             let b = Zmod251::from_positive(lim*k);
             let c = a.mul(b);
-            let n = c.as_positive();
+            let n = c.as_signed();
             // println!("{:?} {:?} res", c.as_signed(), c.as_terms());
-            let ok = if n == lim { "✔️" } else { "❌" };
-            writeln!(&mut str, "({} * {}) * 1/{} = {} {}", lim, k, k, n, ok).unwrap();
+            let ok = if n.0 == lim { "✔️" } else { "❌" };
+            writeln!(&mut str, "({} * {}) * 1/{} = {:?} {}", lim, k, k, n, ok).unwrap();
         }
+        writeln!(&mut str, "").unwrap();
     }
     println!("{}", str)
 }
@@ -533,17 +514,13 @@ fn t5() {
 
 #[test]
 fn t6() {
-    // (1/3 + 1/3) * 3 = 2
-    let a: Zmod251 = 3.into();
-    let b = Zmod251::from_positive(1) / a;
-    // println!("{} {:?}", b.as_positive(), b.as_terms());
-    let b = b.add_faster(b);
-    // println!("{} {:?}", b.as_positive(), b.as_terms());
-    let c = Zmod251::from_positive(3);
 
-    let d = b.mul(c);
-    // println!("{} {:?}", d.as_positive(), d.as_terms());
-    assert!(d.as_positive() == 2);
+    let a: Zmod251 = 7.into();
+    let b = a.reciprocal().unwrap();
+    // let b = b.reciprocal().unwrap();
+
+    println!("{:?} {} {:?}", b.as_signed(), b.as_positive(), b.as_terms());
+    // assert!(b.as_positive() == 3);
 }
 
 // let primes = [2u64, 3, 5, 7, 11, 13, 17, 19, 23, 29, 31, 37, 41, 43, 47, 53, 59, 61, 67, 71, 73, 79, 83, 89, 97, 101, 103, 107, 109, 113, 127, 131, 137, 139, 149, 151, 157, 163, 167, 173, 179, 181, 191, 193, 197, 199, 211, 223, 227, 229, 233, 239, 241, 251];
