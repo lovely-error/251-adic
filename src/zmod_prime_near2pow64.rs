@@ -143,18 +143,6 @@ fn mult_inverse(terms:[u8;8]) -> Option<[u8;8]> {
     }
     return Some(result)
 }
-#[test]
-fn mocha() {
-    let c = ZModB64::from_positive(1732159);
-    let r = mult_inverse(c.as_terms()).unwrap();
-    println!("{:?}", r);
-    let d = multiply(r, c.as_terms());
-    println!("{:?}", d);
-
-    let k = ZModB64::from_terms(&r).as_complement_faster();
-    println!("{}", k);
-}
-
 
 fn compute_row(
     row: [u8;8],
