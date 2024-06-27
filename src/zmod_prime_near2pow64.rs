@@ -120,7 +120,7 @@ const MOD1_TABLE : [u8;251] = {
     let mut i = 1;
     loop {
         if i == 251 { break };
-        let inv = mod_inverse_u16(i as _, 251) ;
+        let inv = mod_inverse_u16(i as _, 251);
         assert!(inv * (i as i32) % 251 == 1);
         t[i] = inv as _;
         i += 1;
@@ -184,6 +184,44 @@ fn multiply(
     }
     return dig_ords
 }
+// for some reason this is twice as slow
+#[allow(dead_code)]
+fn compute_row_simd(
+    row: [u8;8],
+    number: u8
+) -> [u8;8] {
+    let m = Simd::splat(251);
+    let p = Mask::<_, 8>::from_bitmask((u8::MAX >> 1) as _);
+    let mut res = Simd::from_array(row).cast::<u16>();
+    res *= Simd::splat(number).cast();
+    loop {
+        let ov = res.simd_ge(m);
+        if ov.any() {
+            let ovv = ov.select(res, Simd::splat(0));
+            let carries = ovv / m;
+            let rems = ovv - (carries * m);
+            let t = carries.rotate_elements_right::<1>();
+            let t = p.select(t, Simd::splat(0));
+            res = ov.select(rems, res);
+            res += t;
+        } else {
+            break
+        }
+    }
+    return res.cast().to_array();
+}
+
+#[test]
+fn mmm() {
+    let n_ = ZModB64::from_terms(&[1,24,118,26,24,17]);
+    let m = n_.as_terms();
+    let m = compute_row_simd(m, 250);
+    println!("{:?}", m);
+    println!("{:?}", (n_ * 250.into()).as_terms());
+
+    let d = n_ * 250.into();
+    println!("{:?}", d.as_terms())
+}
 
 #[allow(non_camel_case_types)]
 #[derive(Clone, Copy)]
@@ -241,11 +279,12 @@ impl ZModB64 {
         return Self(terms);
     }
     pub fn as_positive(&self) -> u64 {
-        self.as_complement_faster()
+        self.as_complement_simd()
     }
     pub fn as_signed(&self) -> (u64, bool) {
-        let val = self.as_complement_faster();
-        if val > (Self::MAX / 2) - 1 {
+        let is_neg = self.0[7] != 0;
+        let val = self.as_complement_simd();
+        if is_neg {
             ((Self::MAX + 1 - val), false)
         } else {
             (val, true)
@@ -268,7 +307,7 @@ impl ZModB64 {
 
         return k;
     }
-    fn as_complement_faster(&self) -> u64 {
+    fn as_complement_simd(&self) -> u64 {
         const POWERS: Simd<u64, 8> = Simd::from_array([
             1,
             251,
@@ -323,7 +362,7 @@ impl ZModB64 {
         let v = unsafe { transmute(res) };
         return Self(v);
     }
-    fn add_faster(&self, another: Self) -> Self {
+    fn add_simd(&self, another: Self) -> Self {
 
         let this = Simd::from_array(self.as_terms()).cast::<u16>();
         let another = Simd::from_array(another.as_terms()).cast::<u16>();
@@ -408,10 +447,10 @@ impl ZModB64 {
             neg_one[i] -= terms[i];
         }
         let n = Self(neg_one);
-        n.add_faster(Self::ONE)
+        n.add_simd(Self::ONE)
     }
     fn _multiplicative_inverse1_euclid(&self) -> Self {
-        let m = self.as_complement_faster();
+        let m = self.as_complement_simd();
         if m % 251 == 0 {
             panic!("Cannot invert number {} because it doesnt satisfy the equation N % 251 > 0", m)
         }
@@ -421,18 +460,18 @@ impl ZModB64 {
     // has weird quirk
     fn _multiplicative_inverse2_brute(&self) -> Self {
         let inv = brute_force_mul_inverse(self.as_terms()).unwrap_or_else(||{
-            panic!("Cannot invert number {} because it doesnt satisfy the equation N % 251 > 0", self.as_complement_faster())
+            panic!("Cannot invert number {} because it doesnt satisfy the equation N % 251 > 0", self.as_complement_simd())
         });
         return Self(inv);
     }
-    fn _multiplicative_inverse3_fast(&self) -> Self {
+    fn _multiplicative_inverse3_homebrew(&self) -> Self {
         let inv = mult_inverse(self.as_terms()).unwrap_or_else(||{
-            panic!("Cannot invert number {} because it doesnt satisfy the equation N % 251 > 0", self.as_complement_faster())
+            panic!("Cannot invert number {} because it doesnt satisfy the equation N % 251 > 0", self.as_complement_simd())
         });
         return Self(inv);
     }
     pub fn multiplicative_inverse(&self) -> Self {
-        self._multiplicative_inverse3_fast()
+        self._multiplicative_inverse3_homebrew()
     }
     pub fn multiply(&self, another: Self) -> Self {
         let a = self.as_terms();
@@ -456,13 +495,19 @@ impl ZModB64 {
         }
         return Self(result);
     }
+    pub fn pow(&self, another: Self) -> Self {
+        let this = self.as_complement_simd();
+        let another = another.as_complement_simd();
+        let powed = binpow(this as _, another as _, (Self::MAX + 1) as _);
+        return Self::from_positive(powed as _);
+    }
 }
 
 impl core::ops::Add for ZModB64 {
     type Output = Self;
 
     fn add(self, rhs: Self) -> Self::Output {
-        self.add_faster(rhs)
+        self.add_simd(rhs)
     }
 }
 impl core::ops::Mul for ZModB64 {
@@ -531,7 +576,7 @@ fn props_tests() {
 
     // a * 2 = 1
     let a = ZModB64::from_positive(2);
-    let b = a._multiplicative_inverse3_fast();
+    let b = a._multiplicative_inverse3_homebrew();
     let c = a.mul(b);
     assert!(c.as_positive() == 1);
 
@@ -544,7 +589,7 @@ fn props_tests() {
     // -1 + -1 = -2
     let a = ZModB64::from_signed(-1);
     let b = ZModB64::from_signed(-1);
-    let c = a.add_faster(b);
+    let c = a.add_simd(b);
     assert!(c.as_signed() == (2, false));
 
     // a * a = 2
@@ -571,7 +616,7 @@ fn t1() {
     let correct_computed = ZModB64::from_two_complement(correct);
     println!("{} {:?}", correct_computed.as_positive(), correct_computed.as_terms());
 
-    let computed = c.as_complement_faster();
+    let computed = c.as_complement_simd();
     assert!(computed == correct);
 
 
@@ -618,7 +663,7 @@ fn t2() {
 fn t3() {
     // (1/3 + 1/3) * 3 = 2
     let a = ZModB64::from_positive(3);
-    let b = a._multiplicative_inverse3_fast();
+    let b = a._multiplicative_inverse3_homebrew();
     // println!("{} {:?}", b.as_positive(), b.as_terms());
     let b = b + b;
     // println!("{} {:?}", b.as_positive(), b.as_terms());
@@ -637,7 +682,7 @@ fn t15() {
     let d = k * 10.into();
     let r = k + d;
     // println!("{}", r.as_complement_faster());
-    assert!(r.as_complement_faster() == 1);
+    assert!(r.as_complement_simd() == 1);
 }
 
 #[test] #[ignore]
@@ -649,7 +694,7 @@ fn t5() {
         for k in 1 .. lim {
             if k % 251 == 0 { continue }
             let a = ZModB64::from_positive(k);
-            let a = a._multiplicative_inverse3_fast();
+            let a = a._multiplicative_inverse3_homebrew();
             // println!("{:?} recip", a.as_terms());
             let b = ZModB64::from_positive(lim*k);
             let c = a.mul(b);
@@ -685,7 +730,7 @@ fn t7() {
             continue;
         }
         let a = ZModB64::from_positive(p);
-        let b = a._multiplicative_inverse3_fast();
+        let b = a._multiplicative_inverse3_homebrew();
         // println!("{:?} recip", a.as_terms());
         let c = a.mul(b);
         let n = c.as_signed();
@@ -701,7 +746,7 @@ fn t8() {
     for i in 1 .. u16::MAX {
         if i % 251 == 0 { continue }
         let a: ZModB64 = i.into();
-        let b: ZModB64 = a._multiplicative_inverse3_fast();
+        let b: ZModB64 = a._multiplicative_inverse3_homebrew();
         let c = a * b;
         // println!("{:?} {} {:?}", c.as_signed(), c.as_positive(), c.as_terms());
         assert!(c.as_signed() == (1, true));
@@ -716,8 +761,8 @@ fn t9() {
     let c = multiply(m, k);
     println!("{:?} {:?} {:?}", m, k, c);
 
-    let m = m_.as_complement_faster() as u128;
-    let k = m_._multiplicative_inverse2_brute().as_complement_faster() as u128;
+    let m = m_.as_complement_simd() as u128;
+    let k = m_._multiplicative_inverse2_brute().as_complement_simd() as u128;
     let c = (m * k) % (ZModB64::MAX as u128 + 1);
     println!("{}", c);
     assert!(c == 1);
@@ -793,4 +838,34 @@ fn t14() {
     println!("{}", m);
 }
 
+#[test]
+fn powing() {
+    let n = ZModB64::from_positive(3);
+    println!("{}", n.pow(3.into()).as_complement_simd());
+}
 
+#[test]
+fn converge() {
+    // let two = ZModB64::from_positive(2);
+    // let mut res = ZModB64::from_positive(0);
+    // for i in 1 .. 64u64 {
+    //     let powed = two.pow(i.into());
+    //     let rat = powed.multiplicative_inverse();
+    //     assert!((rat * powed).as_complement_simd() == 1);
+    //     res = res + rat;
+    //     println!("{} {:?}", res.as_complement_simd(), res.as_terms());
+    //     // println!("{:?}, ", res.as_complement_simd(), );
+    // }
+
+    let two = ZModB64::from_positive(2);
+    let mut res = ZModB64::from_positive(1);
+    for i in 1 .. (u16::MAX) as u64 {
+        let powed = two.pow(i.into());
+        // let rat = powed.multiplicative_inverse();
+        // assert!((rat * powed).as_complement_simd() == 1);
+        res = res + powed;
+        // println!("{} {:?}", res.as_complement_simd(), res.as_terms());
+        // println!("{:?}, ", res.as_complement_simd(), );
+    }
+    println!("{} {:?}", res.as_complement_simd(), res.as_terms());
+}
